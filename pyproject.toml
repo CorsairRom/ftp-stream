@@ -1,0 +1,7 @@
+[project]
+name = "ftp-stream"
+version = "0.1.0"
+description = "Servicio de streaming de video desde FTP a RTMP"
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = []
