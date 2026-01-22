@@ -42,10 +42,43 @@ create-watch-dir: ## Crea el directorio de monitoreo si no existe
 	@mkdir -p $(WATCH_DIR)
 	@echo "✅ Directorio creado: $(WATCH_DIR)"
 
-test-stream: check-ffmpeg ## Prueba la conexión RTMP (sin procesar archivos)
-	@echo "🧪 Probando conexión RTMP..."
+test-connection: ## Prueba conectividad al servidor RTMP
+	@echo "🔍 Probando conectividad RTMP..."
+	@echo "URL: $(RTMP_URL)"
+	@echo ""
+	@echo "1. Extrayendo host y puerto..."
+	@HOST=$$(echo $(RTMP_URL) | sed -n 's|rtmp://\([^:/]*\).*|\1|p'); \
+	PORT=$$(echo $(RTMP_URL) | sed -n 's|rtmp://[^:]*:\([0-9]*\)/.*|\1|p'); \
+	if [ -z "$$PORT" ]; then PORT=1935; fi; \
+	echo "   Host: $$HOST"; \
+	echo "   Puerto: $$PORT"; \
+	echo ""; \
+	echo "2. Probando conectividad TCP..."; \
+	if timeout 5 bash -c "cat < /dev/null > /dev/tcp/$$HOST/$$PORT" 2>/dev/null; then \
+		echo "   ✅ Puerto $$PORT está ABIERTO en $$HOST"; \
+	else \
+		echo "   ❌ NO se puede conectar a $$HOST:$$PORT"; \
+		echo "   Posibles causas:"; \
+		echo "      • Servidor RTMP apagado"; \
+		echo "      • Firewall bloqueando puerto $$PORT"; \
+		echo "      • Host incorrecto"; \
+		exit 1; \
+	fi; \
+	echo ""; \
+	echo "3. Probando transmisión RTMP real (3 segundos)..."; \
+	timeout 3 ffmpeg -f lavfi -i testsrc=size=640x480:rate=1 -f lavfi -i sine=frequency=440 \
+		-c:v libx264 -preset ultrafast -tune zerolatency -c:a aac \
+		-f flv $(RTMP_URL) -loglevel error 2>&1 || true; \
+	echo ""; \
+	echo "✅ Diagnóstico completo"
+
+test-stream: check-ffmpeg ## Transmite video de prueba continuo (Ctrl+C para detener)
+	@echo "🧪 Transmitiendo video de prueba al servidor RTMP..."
+	@echo "URL: $(RTMP_URL)"
 	@echo "Presiona Ctrl+C para detener"
-	@ffmpeg -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000 -c:v libx264 -preset ultrafast -c:a aac -f flv $(RTMP_URL)
+	@echo ""
+	@ffmpeg -re -f lavfi -i testsrc=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000 \
+		-c:v libx264 -preset ultrafast -tune zerolatency -c:a aac -f flv $(RTMP_URL)
 
 status: ## Muestra el estado del servicio
 	@echo "📊 Estado del servicio:"
@@ -62,3 +95,16 @@ status: ## Muestra el estado del servicio
 	else \
 		echo "  ❌ ffmpeg no instalado"; \
 	fi
+
+install-service: ## Instala el servicio systemd (requiere sudo)
+	@echo "🔧 Instalando como servicio systemd..."
+	@./install-service.sh
+
+service-status: ## Muestra el estado del servicio systemd
+	@sudo systemctl status ftp-stream --no-pager || echo "Servicio no instalado. Ejecuta: make install-service"
+
+service-logs: ## Muestra los logs del servicio systemd
+	@sudo journalctl -u ftp-stream -n 50 --no-pager
+
+service-logs-live: ## Sigue los logs del servicio en tiempo real
+	@sudo journalctl -u ftp-stream -f

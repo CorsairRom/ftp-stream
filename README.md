@@ -207,6 +207,74 @@ uv lock --upgrade
 
 ## 🐳 Despliegue como Servicio (Systemd)
 
+### Instalación Automática
+
+El proyecto incluye un script que configura automáticamente el servicio:
+
+```bash
+# Instalar como servicio systemd
+make install-service
+
+# O directamente
+./install-service.sh
+```
+
+El script:
+- ✅ Detecta automáticamente paths y usuario
+- ✅ Crea el servicio systemd
+- ✅ Habilita inicio automático
+- ✅ Configura variables de entorno
+- ✅ Opción para iniciar inmediatamente
+
+### Comandos del Servicio
+
+```bash
+# Ver estado
+make service-status
+# o
+sudo systemctl status ftp-stream
+
+# Ver logs
+make service-logs          # Últimos 50 logs
+make service-logs-live     # Seguir logs en vivo
+
+# Controlar servicio
+sudo systemctl start ftp-stream      # Iniciar
+sudo systemctl stop ftp-stream       # Detener
+sudo systemctl restart ftp-stream    # Reiniciar
+sudo systemctl enable ftp-stream     # Habilitar inicio automático
+sudo systemctl disable ftp-stream    # Deshabilitar inicio automático
+```
+
+### Modificar Configuración del Servicio
+
+```bash
+# Editar el servicio
+sudo nano /etc/systemd/system/ftp-stream.service
+
+# Cambiar variables de entorno en la sección [Service]:
+# Environment="WATCH_DIR=/otra/ruta"
+# Environment="RTMP_URL=rtmp://servidor:1935/app/key"
+# Environment="SCAN_INTERVAL=1"
+
+# Recargar y reiniciar
+sudo systemctl daemon-reload
+sudo systemctl restart ftp-stream
+```
+
+### Desinstalar Servicio
+
+```bash
+sudo systemctl stop ftp-stream
+sudo systemctl disable ftp-stream
+sudo rm /etc/systemd/system/ftp-stream.service
+sudo systemctl daemon-reload
+```
+
+### Instalación Manual (alternativa)
+
+Si prefieres crear el servicio manualmente:
+
 Crear archivo `/etc/systemd/system/ftp-stream.service`:
 
 ```ini
@@ -218,7 +286,9 @@ After=network.target
 Type=simple
 User=tu-usuario
 WorkingDirectory=/ruta/a/ftp-stream
-ExecStart=/home/tu-usuario/.cargo/bin/uv run python streamer.py
+Environment="WATCH_DIR=/home/tu-usuario/camera_data"
+Environment="RTMP_URL=rtmp://servidor:1935/app/key"
+ExecStart=/usr/bin/python3 /ruta/a/ftp-stream/streamer.py
 Restart=always
 RestartSec=10
 

@@ -68,6 +68,35 @@ def log(message, level="INFO"):
     print(f"[{timestamp}] [{level}] {message}")
 
 
+def test_rtmp_connection():
+    """Prueba la conectividad al servidor RTMP."""
+    import socket
+    from urllib.parse import urlparse
+    
+    try:
+        parsed = urlparse(RTMP_URL)
+        host = parsed.hostname
+        port = parsed.port or 1935
+        
+        log(f"Probando conexión a {host}:{port}...")
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5)
+        result = sock.connect_ex((host, port))
+        sock.close()
+        
+        if result == 0:
+            log(f"✅ Puerto {port} abierto en {host}", "SUCCESS")
+            return True
+        else:
+            log(f"❌ No se puede conectar a {host}:{port}", "ERROR")
+            log(f"Verifica: 1) Servidor encendido, 2) Puerto correcto, 3) Firewall", "ERROR")
+            return False
+    except Exception as e:
+        log(f"❌ Error probando conexión: {e}", "ERROR")
+        return False
+
+
 # Validar configuración al inicio
 if not os.path.exists(WATCH_DIR):
     log(f"ERROR: El directorio {WATCH_DIR} no existe", "ERROR")
@@ -85,6 +114,14 @@ log(f"Máximo reintentos: {MAX_RETRIES}")
 log(f"Intervalo escaneo: {SCAN_INTERVAL}s")
 log("-" * 60)
 
+# Probar conectividad al servidor RTMP
+if not test_rtmp_connection():
+    log("⚠️  ADVERTENCIA: No se puede conectar al servidor RTMP", "WARN")
+    log("El servicio continuará, pero las transmisiones fallarán", "WARN")
+    log("-" * 60)
+else:
+    log("-" * 60)
+
 # Tracking del último archivo procesado (por timestamp de modificación)
 last_processed_mtime = 0
 failed_files = {}  # {filepath: {'count': int, 'last_attempt': timestamp}}
@@ -100,6 +137,11 @@ while True:
         
         # Ordenar por fecha de modificación (el más viejo primero)
         files.sort(key=os.path.getmtime)
+        
+        log(f"📋 Total archivos encontrados (>={MIN_FILE_AGE}s edad): {len(files)}")
+        for idx, f in enumerate(files, 1):
+            age = int(time.time() - os.path.getmtime(f))
+            log(f"   {idx}. {os.path.basename(f)} (edad: {age}s)")
         
         # PASO 1: Limpiar archivos viejos (anteriores al último procesado)
         # Esto evita volver atrás en el tiempo
@@ -217,9 +259,21 @@ while True:
             failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
             
         except subprocess.CalledProcessError as e:
-            log(f"❌ Error en transmisión: {os.path.basename(target)}", "ERROR")
-            if e.stderr:
-                log(f"FFmpeg: {e.stderr.strip()}", "ERROR")
+            error_msg = e.stderr.strip() if e.stderr else ""
+            
+            # Detectar error específico de Broken Pipe (servidor rechaza conexión)
+            if "Broken pipe" in error_msg or "Connection refused" in error_msg:
+                log(f"❌ Error en transmisión: {os.path.basename(target)}", "ERROR")
+                log(f"🔌 PROBLEMA DE CONEXIÓN RTMP:", "ERROR")
+                log(f"   • El servidor rechazó o cerró la conexión", "ERROR")
+                log(f"   • Verifica que el servidor RTMP esté corriendo", "ERROR")
+                log(f"   • Verifica que la URL/clave sean correctas", "ERROR")
+                log(f"   • URL: {RTMP_URL}", "ERROR")
+            else:
+                log(f"❌ Error en transmisión: {os.path.basename(target)}", "ERROR")
+                if error_msg:
+                    log(f"FFmpeg: {error_msg}", "ERROR")
+            
             failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
             
         except Exception as e:
