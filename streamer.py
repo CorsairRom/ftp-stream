@@ -85,111 +85,153 @@ log(f"Máximo reintentos: {MAX_RETRIES}")
 log(f"Intervalo escaneo: {SCAN_INTERVAL}s")
 log("-" * 60)
 
-streamed_files = set()
+# Tracking del último archivo procesado (por timestamp de modificación)
+last_processed_mtime = 0
 failed_files = {}  # {filepath: {'count': int, 'last_attempt': timestamp}}
 
 while True:
     try:
         files = get_files()
         
-        if len(files) >= 2:
-            # Ordenar por fecha (el más viejo primero)
-            files.sort(key=os.path.getmtime)
-            
-            # IMPORTANTE: Tomamos el PENÚLTIMO (files[-2])
-            # El último (files[-1]) siempre está siendo escrito por la cámara
-            target = files[-2]
-            
-            # Verificar si ya fue procesado exitosamente
-            if target in streamed_files:
-                pass  # Ya procesado exitosamente, esperar a que haya más archivos
-            else:
-                # Obtener info de intentos previos
-                file_info = failed_files.get(target, {'count': 0, 'last_attempt': 0})
-                retry_count = file_info['count']
-                last_attempt = file_info['last_attempt']
-                
-                # Verificar si ya falló demasiadas veces RECIENTEMENTE
-                # Permitir reintentar después de 5 minutos (300 segundos)
-                time_since_last_attempt = time.time() - last_attempt
-                if retry_count >= MAX_RETRIES and time_since_last_attempt < 300:
-                    # Saltarlo por ahora, puede estar siendo escrito aún
-                    log(f"Saltando archivo (intentos previos: {retry_count}, esperando antes de reintentar): {os.path.basename(target)}")
-                else:
-                    # Resetear contador si ha pasado suficiente tiempo
-                    if time_since_last_attempt >= 300:
-                        retry_count = 0
-                    
-                    attempt = retry_count + 1
-                    
-                    log(f"Procesando ({attempt}/{MAX_RETRIES}): {os.path.basename(target)}")
-                    
-                    # Validar que el archivo esté completo
-                    if not validate_video_file(target):
-                        log(f"Archivo corrupto o incompleto (puede estar escribiéndose): {os.path.basename(target)}", "WARN")
-                        failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
-                        
-                        if attempt >= MAX_RETRIES:
-                            log(f"Archivo no válido tras {MAX_RETRIES} intentos, se saltará temporalmente: {os.path.basename(target)}", "WARN")
-                            log(f"Se reintentará automáticamente en 5 minutos si sigue ahí", "INFO")
-                        continue
-                
-                log(f"Transmitiendo: {os.path.basename(target)}")
-                
-                # Comando FFmpeg: Lee el archivo y lo empuja al servidor RTMP
-                cmd = [
-                    "ffmpeg", "-re", "-i", target,
-                    "-c", "copy", "-f", "flv",
-                    "-rtmp_buffer", "1000",  # Buffer para conexiones inestables
-                    "-loglevel", "error",    # Solo mostrar errores
-                    RTMP_URL
-                ]
-                
+        if len(files) == 0:
+            log("No hay archivos para procesar")
+            time.sleep(SCAN_INTERVAL)
+            continue
+        
+        # Ordenar por fecha de modificación (el más viejo primero)
+        files.sort(key=os.path.getmtime)
+        
+        # PASO 1: Limpiar archivos viejos (anteriores al último procesado)
+        # Esto evita volver atrás en el tiempo
+        old_files = []
+        for f in files:
+            f_mtime = os.path.getmtime(f)
+            if f_mtime <= last_processed_mtime:
+                old_files.append(f)
+        
+        if old_files:
+            log(f"⚠️  Encontrados {len(old_files)} archivos VIEJOS (anteriores al último procesado)")
+            for old_file in old_files:
                 try:
-                    # Ejecutar transmisión
-                    result = subprocess.run(
-                        cmd, 
-                        check=True,
-                        capture_output=True,
-                        text=True,
-                        timeout=3600  # Timeout de 1 hora
-                    )
-                    
-                    # Éxito: marcar como procesado y eliminar
-                    streamed_files.add(target)
+                    log(f"🗑️  Descartando archivo viejo: {os.path.basename(old_file)}")
+                    os.remove(old_file)
+                    # Limpiar del registro de fallos
+                    if old_file in failed_files:
+                        del failed_files[old_file]
+                except Exception as e:
+                    log(f"Error al borrar archivo viejo: {e}", "ERROR")
+            
+            # Refrescar lista sin archivos viejos
+            files = [f for f in files if f not in old_files]
+            if len(files) == 0:
+                log("No quedan archivos por procesar después de limpiar viejos")
+                time.sleep(SCAN_INTERVAL)
+                continue
+        
+        # PASO 2: Descartar el último archivo (siempre se está escribiendo)
+        if len(files) >= 2:
+            # Excluir el último (se está escribiendo)
+            available_files = files[:-1]
+            currently_writing = files[-1]
+            log(f"📹 Archivo en escritura (ignorado): {os.path.basename(currently_writing)}")
+        else:
+            # Solo hay 1 archivo, debe estar escribiéndose
+            log(f"Solo 1 archivo disponible (debe estar siendo escrito), esperando más archivos...")
+            time.sleep(SCAN_INTERVAL)
+            continue
+        
+        # PASO 3: De los archivos disponibles, tomar el MÁS VIEJO (para ir en orden secuencial)
+        # Esto garantiza que vamos 10:30 → 10:31 → 10:32 (nunca hacia atrás)
+        target = available_files[0]  # El más viejo disponible (ya ordenado)
+        
+        log(f"📂 Archivos disponibles: {len(available_files)}, Procesando el más antiguo: {os.path.basename(target)}")
+        
+        # PASO 4: Verificar intentos previos
+        file_info = failed_files.get(target, {'count': 0, 'last_attempt': 0})
+        retry_count = file_info['count']
+        last_attempt = file_info['last_attempt']
+        
+        # Verificar si ya falló demasiadas veces RECIENTEMENTE
+        time_since_last_attempt = time.time() - last_attempt
+        if retry_count >= MAX_RETRIES and time_since_last_attempt < 300:
+            log(f"⏭️  Saltando temporalmente (intentos: {retry_count}, se reintentará en {int(300 - time_since_last_attempt)}s): {os.path.basename(target)}")
+            time.sleep(SCAN_INTERVAL)
+            continue
+        
+        # Resetear contador si ha pasado suficiente tiempo
+        if time_since_last_attempt >= 300:
+            retry_count = 0
+        
+        attempt = retry_count + 1
+        log(f"🔄 Procesando ({attempt}/{MAX_RETRIES}): {os.path.basename(target)}")
+        
+        # PASO 5: Validar que el archivo esté completo
+        if not validate_video_file(target):
+            log(f"⚠️  Archivo corrupto o incompleto: {os.path.basename(target)}", "WARN")
+            failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
+            
+            if attempt >= MAX_RETRIES:
+                log(f"❌ Archivo no válido tras {MAX_RETRIES} intentos, se descartará: {os.path.basename(target)}", "ERROR")
+                try:
                     os.remove(target)
-                    log(f"✓ Transmitido y eliminado: {os.path.basename(target)}", "SUCCESS")
-                    
-                    # Limpiar del registro de fallos si estaba ahí
+                    log(f"🗑️  Archivo corrupto eliminado: {os.path.basename(target)}")
                     if target in failed_files:
                         del failed_files[target]
-                    
-                except subprocess.TimeoutExpired:
-                    log(f"Timeout transmitiendo: {os.path.basename(target)}", "ERROR")
-                    failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
-                    
-                except subprocess.CalledProcessError as e:
-                    log(f"Error en transmisión: {os.path.basename(target)}", "ERROR")
-                    if e.stderr:
-                        log(f"FFmpeg error: {e.stderr.strip()}", "ERROR")
-                    failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
-                    
                 except Exception as e:
-                    log(f"Error inesperado: {e}", "ERROR")
-                    failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
+                    log(f"Error al eliminar archivo corrupto: {e}", "ERROR")
+            
+            time.sleep(SCAN_INTERVAL)
+            continue
         
-        elif len(files) == 1:
-            log(f"Solo 1 archivo encontrado (puede estar siendo escrito), esperando...")
-        else:
-            log(f"No hay archivos para procesar")
+        # PASO 6: Transmitir el archivo
+        log(f"📡 Transmitiendo: {os.path.basename(target)}")
+        
+        cmd = [
+            "ffmpeg", "-re", "-i", target,
+            "-c", "copy", "-f", "flv",
+            "-rtmp_buffer", "1000",
+            "-loglevel", "error",
+            RTMP_URL
+        ]
+        
+        try:
+            result = subprocess.run(
+                cmd, 
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3600
+            )
+            
+            # ÉXITO: actualizar timestamp y eliminar archivo
+            last_processed_mtime = os.path.getmtime(target)
+            os.remove(target)
+            log(f"✅ Transmitido y eliminado: {os.path.basename(target)}", "SUCCESS")
+            
+            # Limpiar del registro de fallos
+            if target in failed_files:
+                del failed_files[target]
+            
+        except subprocess.TimeoutExpired:
+            log(f"⏱️  Timeout transmitiendo: {os.path.basename(target)}", "ERROR")
+            failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
+            
+        except subprocess.CalledProcessError as e:
+            log(f"❌ Error en transmisión: {os.path.basename(target)}", "ERROR")
+            if e.stderr:
+                log(f"FFmpeg: {e.stderr.strip()}", "ERROR")
+            failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
+            
+        except Exception as e:
+            log(f"❌ Error inesperado: {e}", "ERROR")
+            failed_files[target] = {'count': attempt, 'last_attempt': time.time()}
         
     except KeyboardInterrupt:
-        log("\nInterrumpido por el usuario", "INFO")
-        log(f"Archivos procesados: {len(streamed_files)}", "INFO")
-        log(f"Archivos fallidos: {len(failed_files)}", "INFO")
+        log("\n⏹️  Interrumpido por el usuario", "INFO")
+        log(f"📊 Archivos fallidos pendientes: {len(failed_files)}", "INFO")
         sys.exit(0)
     
     except Exception as e:
-        log(f"Error en loop principal: {e}", "ERROR")
+        log(f"❌ Error en loop principal: {e}", "ERROR")
     
     time.sleep(SCAN_INTERVAL)

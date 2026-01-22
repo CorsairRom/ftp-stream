@@ -99,16 +99,61 @@ make check-ffmpeg      # Verifica que ffmpeg esté instalado
 
 ## 📖 Cómo Funciona
 
-1. **Monitoreo:** El servicio monitorea el directorio `WATCH_DIR` cada 5 segundos (configurable)
-2. **Filtrado por edad:** Solo procesa archivos con antigüedad >= `MIN_FILE_AGE` segundos (evita archivos en escritura)
-3. **Validación:** Usa `ffprobe` para verificar que el archivo esté completo antes de transmitir
-4. **Selección:** Cuando hay 2+ videos válidos, selecciona el penúltimo (el último puede estar siendo escrito)
-5. **Streaming:** Transmite el video seleccionado al servidor RTMP usando ffmpeg
-6. **Limpieza:** Después de transmitir exitosamente, elimina el archivo para liberar espacio
-7. **Manejo de errores:** 
-   - Archivos corruptos/incompletos se reintentan hasta `MAX_RETRIES` veces
-   - Después de 3 intentos fallidos, se mueven a la carpeta `_failed/`
-   - No se reintenta indefinidamente el mismo archivo
+El servicio genera un **stream continuo "casi en vivo"** (1-5 min de retraso) a partir de los videos que la cámara va escribiendo:
+
+### 🔄 Lógica de Transmisión Secuencial:
+
+1. **Monitoreo continuo**: Escanea `WATCH_DIR` cada 5 segundos (configurable)
+
+2. **Filtrado por edad**: Solo procesa archivos con >= 30 segundos de antigüedad (evita archivos en escritura)
+
+3. **Limpieza de archivos viejos**: 
+   - Si el stream se detuvo y hay videos anteriores al último procesado
+   - Los **borra automáticamente** (nunca vuelve atrás en el tiempo)
+   - Ejemplo: Si último fue `10:31`, borra `10:28`, `10:29`, `10:30`
+
+4. **Exclusión del último archivo**:
+   - El archivo más reciente **SIEMPRE se ignora** (se está escribiendo)
+   - Si hay `10:30`, `10:31`, `10:32` → ignora `10:32`
+
+5. **Selección secuencial**:
+   - De los archivos disponibles, toma el **MÁS VIEJO** (garantiza orden cronológico)
+   - Transmite `10:30` → luego `10:31` → luego `10:32` (siempre hacia adelante)
+
+6. **Validación con ffprobe**: Verifica que el video esté completo antes de transmitir
+
+7. **Transmisión RTMP**: Usa ffmpeg con `-re` (tiempo real) y `-c copy` (sin re-codificar)
+
+8. **Limpieza post-transmisión**: Elimina el archivo exitosamente transmitido
+
+9. **Manejo de errores**:
+   - Archivos corruptos: reintenta hasta 3 veces
+   - Si falla 3 veces: descarta (borra) y continúa con el siguiente
+   - Reintentos automáticos después de 5 minutos
+
+### 📊 Ejemplo de Flujo:
+
+```
+Momento 1 (10:31):
+  Archivos: 10:28.mp4, 10:29.mp4, 10:30.mp4, 10:31.mp4 (escribiendo)
+  Acción: Transmite 10:28, borra 10:28
+
+Momento 2 (10:32):
+  Archivos: 10:29.mp4, 10:30.mp4, 10:31.mp4, 10:32.mp4 (escribiendo)
+  Acción: Transmite 10:29, borra 10:29
+
+Momento 3 (10:33):
+  Archivos: 10:30.mp4, 10:31.mp4, 10:32.mp4, 10:33.mp4 (escribiendo)
+  Acción: Transmite 10:30, borra 10:30
+
+(Stream se detiene 10 minutos...)
+
+Momento 4 (10:45 - reinicio):
+  Archivos: 10:31-10:44.mp4, 10:45.mp4 (escribiendo)
+  Acción: Borra 10:31-10:40 (viejos), transmite 10:41, continúa secuencial
+```
+
+**Resultado**: Stream continuo, siempre avanzando en el tiempo, ~1-3 videos de retraso respecto al "vivo".
 
 ## 🔧 Desarrollo
 
