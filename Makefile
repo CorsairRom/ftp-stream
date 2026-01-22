@@ -108,3 +108,9 @@ service-logs: ## Muestra los logs del servicio systemd
 
 service-logs-live: ## Sigue los logs del servicio en tiempo real
 	@sudo journalctl -u ftp-stream -f
+
+logs: ## Muestra los últimos logs del archivo (modo manual)
+	@tail -n 50 ~/ftp-stream.log 2>/dev/null || echo "No hay logs aún. El archivo se crea al ejecutar el servicio."
+
+logs-live: ## Sigue los logs del archivo en tiempo real (modo manual)
+	@tail -f ~/ftp-stream.log

@@ -4,6 +4,7 @@ import subprocess
 import glob
 import sys
 from datetime import datetime, timedelta
+import logging
 
 # CONFIGURACIÓN (puedes sobreescribir con variables de entorno)
 WATCH_DIR = os.getenv("WATCH_DIR", os.path.expanduser("~/camera_data"))
@@ -18,6 +19,19 @@ MAX_RETRIES = int(os.getenv("MAX_RETRIES", "3"))
 
 # Intervalo de escaneo (en segundos)
 SCAN_INTERVAL = int(os.getenv("SCAN_INTERVAL", "5"))
+
+# Configurar logging dual (consola + archivo)
+LOG_FILE = os.path.expanduser("~/ftp-stream.log")
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, encoding='utf-8')
+    ]
+)
+logger = logging.getLogger(__name__)
 
 def get_files():
     """Busca todos los mp4 en subcarpetas que sean lo suficientemente viejos."""
@@ -63,9 +77,16 @@ def validate_video_file(filepath):
         return False
 
 def log(message, level="INFO"):
-    """Logger simple con timestamp."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{timestamp}] [{level}] {message}")
+    """Logger con timestamp a consola y archivo."""
+    level_map = {
+        "INFO": logging.INFO,
+        "WARN": logging.WARNING,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "SUCCESS": logging.INFO,
+        "DEBUG": logging.DEBUG
+    }
+    logger.log(level_map.get(level, logging.INFO), message)
 
 
 def test_rtmp_connection():
@@ -107,6 +128,7 @@ if not RTMP_URL or RTMP_URL == "rtmp://a.rtmp.youtube.com/live2":
     log("Ejemplo: export RTMP_URL='rtmp://server:1935/app/stream_key'", "WARN")
 
 log("Iniciando puente de video...")
+log(f"Archivo de logs: {LOG_FILE}")
 log(f"Monitoreando: {WATCH_DIR}")
 log(f"Destino RTMP: {RTMP_URL}")
 log(f"Edad mínima archivo: {MIN_FILE_AGE}s")
@@ -170,23 +192,41 @@ while True:
                 time.sleep(SCAN_INTERVAL)
                 continue
         
-        # PASO 2: Descartar el último archivo (siempre se está escribiendo)
-        if len(files) >= 2:
-            # Excluir el último (se está escribiendo)
-            available_files = files[:-1]
-            currently_writing = files[-1]
-            log(f"📹 Archivo en escritura (ignorado): {os.path.basename(currently_writing)}")
-        else:
-            # Solo hay 1 archivo, debe estar escribiéndose
-            log(f"Solo 1 archivo disponible (debe estar siendo escrito), esperando más archivos...")
+        # PASO 2: Identificar el archivo que AÚN SE ESTÁ ESCRIBIENDO
+        # Un archivo se considera "en escritura" si:
+        # 1. Fue modificado recientemente (< MIN_FILE_AGE segundos)
+        # 2. O es el último por fecha de modificación Y tiene < 5 minutos
+        
+        now = time.time()
+        writing_files = []
+        available_files = []
+        
+        for f in files:
+            f_mtime = os.path.getmtime(f)
+            age = now - f_mtime
+            
+            # Si el archivo fue modificado hace menos de 60 segundos, probablemente se está escribiendo
+            if age < 60:
+                writing_files.append(f)
+                log(f"✏️  Archivo RECIENTE (ignorado, edad: {int(age)}s): {os.path.basename(f)}")
+            else:
+                available_files.append(f)
+        
+        if not available_files:
+            log(f"No hay archivos listos (todos son muy recientes), esperando...")
             time.sleep(SCAN_INTERVAL)
             continue
+        
+        log(f"📋 Archivos disponibles para streaming: {len(available_files)}")
+        for idx, f in enumerate(available_files, 1):
+            age = int(now - os.path.getmtime(f))
+            log(f"   {idx}. {os.path.basename(f)} (edad: {age}s)")
         
         # PASO 3: De los archivos disponibles, tomar el MÁS VIEJO (para ir en orden secuencial)
         # Esto garantiza que vamos 10:30 → 10:31 → 10:32 (nunca hacia atrás)
         target = available_files[0]  # El más viejo disponible (ya ordenado)
         
-        log(f"📂 Archivos disponibles: {len(available_files)}, Procesando el más antiguo: {os.path.basename(target)}")
+        log(f"🎯 Seleccionado para transmitir: {os.path.basename(target)}")
         
         # PASO 4: Verificar intentos previos
         file_info = failed_files.get(target, {'count': 0, 'last_attempt': 0})
