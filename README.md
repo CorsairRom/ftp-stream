@@ -45,11 +45,33 @@ brew install ffmpeg
 
 ## ⚙️ Configuración
 
-Edita las variables en `streamer.py`:
+### Variables de Entorno
 
-```python
-WATCH_DIR = os.path.expanduser("~/camera_data")  # Directorio donde llegan los videos
-RTMP_URL = "rtmp://a.rtmp.youtube.com/live2"     # URL RTMP de destino
+Copia el archivo de ejemplo y edítalo:
+
+```bash
+cp .env.example .env
+nano .env  # o tu editor favorito
+```
+
+Variables disponibles:
+
+- **`WATCH_DIR`**: Directorio donde llegan los videos (default: `~/camera_data`)
+- **`RTMP_URL`**: URL completa del servidor RTMP con tu clave de streaming
+- **`MIN_FILE_AGE`**: Segundos que debe tener un archivo antes de procesarlo (default: `30`)
+- **`MAX_RETRIES`**: Número máximo de reintentos por archivo (default: `3`)
+- **`SCAN_INTERVAL`**: Intervalo de escaneo en segundos (default: `5`)
+
+### Configuración RTMP
+
+Edita las variables en `.env` o directamente en `streamer.py`:
+
+```bash
+# Para desarrollo/pruebas (tu servidor actual)
+export RTMP_URL="rtmp://dev.video360.heligrafics.net:1935/qforest/test_device_001"
+
+# Para YouTube Live (necesitas obtener tu clave)
+export RTMP_URL="rtmp://a.rtmp.youtube.com/live2/{tu-clave-secreta}"
 ```
 
 ### YouTube Live
@@ -77,10 +99,16 @@ make check-ffmpeg      # Verifica que ffmpeg esté instalado
 
 ## 📖 Cómo Funciona
 
-1. **Monitoreo:** El servicio monitorea el directorio `WATCH_DIR` cada 5 segundos
-2. **Selección:** Cuando hay 2+ videos, selecciona el penúltimo (el último puede estar siendo escrito)
-3. **Streaming:** Transmite el video seleccionado al servidor RTMP usando ffmpeg
-4. **Limpieza:** Después de transmitir, elimina el archivo para liberar espacio
+1. **Monitoreo:** El servicio monitorea el directorio `WATCH_DIR` cada 5 segundos (configurable)
+2. **Filtrado por edad:** Solo procesa archivos con antigüedad >= `MIN_FILE_AGE` segundos (evita archivos en escritura)
+3. **Validación:** Usa `ffprobe` para verificar que el archivo esté completo antes de transmitir
+4. **Selección:** Cuando hay 2+ videos válidos, selecciona el penúltimo (el último puede estar siendo escrito)
+5. **Streaming:** Transmite el video seleccionado al servidor RTMP usando ffmpeg
+6. **Limpieza:** Después de transmitir exitosamente, elimina el archivo para liberar espacio
+7. **Manejo de errores:** 
+   - Archivos corruptos/incompletos se reintentan hasta `MAX_RETRIES` veces
+   - Después de 3 intentos fallidos, se mueven a la carpeta `_failed/`
+   - No se reintenta indefinidamente el mismo archivo
 
 ## 🔧 Desarrollo
 
@@ -190,12 +218,46 @@ make create-watch-dir
 ```bash
 # Probar conexión con video de prueba
 make test-stream
+
+# Verificar que la URL RTMP esté completa y sea correcta
+echo $RTMP_URL
+```
+
+### Archivos corruptos ("moov atom not found")
+Este error ocurre cuando el archivo aún se está escribiendo o está corrupto:
+
+**Solución automática** (ya implementada):
+- El script espera `MIN_FILE_AGE` segundos antes de procesar
+- Valida con `ffprobe` antes de transmitir
+- Reintenta hasta `MAX_RETRIES` veces
+- Mueve archivos fallidos a `_failed/`
+
+**Ajustar manualmente**:
+```bash
+# Aumentar tiempo de espera (ej: 60 segundos)
+export MIN_FILE_AGE=60
+make run
+
+# O editar en .env
+echo "MIN_FILE_AGE=60" >> .env
+```
+
+### Ver archivos fallidos
+```bash
+# Los archivos corruptos se mueven aquí
+ls -lh ~/camera_data/_failed/
 ```
 
 ### Permisos
 ```bash
 # Asegurar permisos de lectura en el directorio
 chmod -R 755 ~/camera_data
+```
+
+### Logs más detallados
+El script ya incluye timestamps y logging mejorado. Para ver logs del servicio systemd:
+```bash
+sudo journalctl -u ftp-stream -f
 ```
 
 ## 📝 Notas
